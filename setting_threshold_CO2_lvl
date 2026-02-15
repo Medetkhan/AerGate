@@ -1,0 +1,128 @@
+import machine
+from machine import Pin, ADC, PWM, I2C
+from pico_i2c_lcd import I2cLcd
+import utime
+
+PERCENT_TO_OPEN = 65     
+PERCENT_TO_CLOSE = 85   
+
+BUZZER_FREQ = 4000
+STEP_DELAY_MS = 2
+STEPS_TO_MOVE = 800
+
+lcd_ok = True
+i2c = I2C(0, sda=Pin(0), scl=Pin(1), freq=400000)
+
+try:
+    I2C_ADDR = i2c.scan()[0]
+    lcd = I2cLcd(i2c, I2C_ADDR, 2, 16)
+except:
+    lcd_ok = False
+    print("LCD not found! Check SDA (GP0) and SCL (GP1)")
+
+pins = [
+    Pin(10, Pin.OUT),
+    Pin(11, Pin.OUT),
+    Pin(12, Pin.OUT),
+    Pin(13, Pin.OUT)
+]
+
+mq135 = ADC(Pin(26))
+buzzer = PWM(Pin(15))
+led = Pin(16, Pin.OUT)
+
+window_is_open = False
+
+sequence = [
+    [1, 0, 1, 0],
+    [0, 1, 1, 0],
+    [0, 1, 0, 1],
+    [1, 0, 0, 1]
+]
+
+def get_air_quality(raw_val):
+    min_clean = 11000
+    max_dirty = 45000
+    val = max(min_clean, min(max_dirty, raw_val))
+    percent = 100 - ((val - min_clean) / (max_dirty - min_clean) * 100)
+    return int(percent)
+
+
+def update_display(quality, status_msg):
+    if not lcd_ok:
+        return
+
+    if quality > 80:
+        air_label = "Perfect"
+    elif quality > 50:
+        air_label = "Normal"
+    elif quality > 30:
+        air_label = "Low"
+    else:
+        air_label = "DANGER!"
+
+    lcd.clear()
+    lcd.putstr("Air:{}% {}".format(quality, air_label))
+    lcd.move_to(0, 1)
+    lcd.putstr("Window: {}".format(status_msg))
+
+
+def alert_sound():
+    for _ in range(3):
+        led.value(1)
+        buzzer.freq(BUZZER_FREQ)
+        buzzer.duty_u16(32768)
+        utime.sleep(0.15)
+
+        led.value(0)
+        buzzer.duty_u16(0)
+        utime.sleep(0.1)
+
+
+def move_window(direction, steps, current_quality):
+    alert_sound()
+
+    status_text = "OPENING..." if direction > 0 else "CLOSING..."
+    update_display(current_quality, status_text)
+
+    step_sequence = sequence if direction > 0 else list(reversed(sequence))
+
+    led.value(1)
+
+    for _ in range(steps):
+        for step in step_sequence:
+            for i in range(4):
+                pins[i].value(step[i])
+            utime.sleep_ms(STEP_DELAY_MS)
+
+    for p in pins:
+        p.value(0)
+
+    led.value(0)
+    utime.sleep_ms(300)
+
+    if lcd_ok:
+        lcd.clear()
+
+if lcd_ok:
+    lcd.clear()
+    lcd.putstr("SMART WINDOW\nSYSTEM READY")
+
+utime.sleep(2)
+
+while True:
+    raw_value = mq135.read_u16()
+    quality_percent = get_air_quality(raw_value)
+
+    status = "OPEN" if window_is_open else "CLOSED"
+    update_display(quality_percent, status)
+
+    if quality_percent <= PERCENT_TO_OPEN and not window_is_open:
+        move_window(1, STEPS_TO_MOVE, quality_percent)
+        window_is_open = True
+
+    elif quality_percent >= PERCENT_TO_CLOSE and window_is_open:
+        move_window(-1, STEPS_TO_MOVE, quality_percent)
+        window_is_open = False
+
+    utime.sleep(1)
